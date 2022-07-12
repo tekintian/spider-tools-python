@@ -1,4 +1,6 @@
-from urllib import request
+import requests
+from requests.adapters import HTTPAdapter
+
 import chardet
 import re
 import os
@@ -14,9 +16,11 @@ from rand_ua import get_rand_ua
 
 class Spider(object):
     # 定义构造方法
-    def __init__(self, url, re_title, re_list, re_content, re_intro='', save_dir='article/'):
+    def __init__(self, url, re_title, re_list, re_content, re_intro='', save_dir='article/', timeout=60, max_retry=3):
         # 设置属性
         self.def_charset = "utf-8"
+        self.timeout = timeout
+        self.max_retry = max_retry
         self.url = url
         self.re_title = re_title
         self.re_list = re_list
@@ -34,37 +38,72 @@ class Spider(object):
     def __str__(self):  # __str__(self)不可以添加参数(形参)
         return "url: %s save_dir: %s def_charset: %s " % (self.url, self.save_dir, self.def_charset)
 
+    # 在控制台打印日志
+    def show_log(self, msg):
+        sys.stdout.write(msg)
+        sys.stdout.flush()
     # 请求网络数据, 兼容不同网页编码,支持gzip, 解决了返回乱码问题
     # @author tekintian@gmail.com
 
     def http_req(self, url):
-        # 自定义请求header
-        headers = {'User-Agent': get_rand_ua(), 'Referer': ''}
-        # 注意这里的请求方式, 如果Request没有传递data数据,则默认为get请求,如果有 data=xxx 则为POST请求
-        req = request.Request(url=url, headers=headers)
-        res = request.urlopen(req)
-        data = res.read()
-        # 自动检测内容编码 解决返回数据编码问题导致的乱码
-        chd = chardet.detect(data)
-        charset = chd['encoding']
-        if charset != '' and charset != None:  # 如果检测到编码, 将数据编码设置为检测到的编码,忽略其他编码
-            data = data.decode(charset, 'ignore')
-        elif charset == None:  # 如果charset为 None 可能是被压缩了,解压后再编码
-            data = gzip.decompress(data).decode(self.def_charset, 'ignore')
-        else:
-            data = data.decode(self.def_charset, 'ignore')
+        req = requests.Session()
+        req.mount('http://', HTTPAdapter(max_retries=self.max_retry))
+        req.mount('https://', HTTPAdapter(max_retries=self.max_retry))
 
-        return data
+        # try:
+        # r = req.get('http://www.google.com.hk', timeout=5)
+        # return r.text
+        # except requests.exceptions.RequestException as e:
+        # print(e)
+        # print(time.strftime('%Y-%m-%d %H:%M:%S'))
+        # 自定义请求header
+        req.headers = {'User-Agent': get_rand_ua(),
+                       'Accept-Encoding': 'gzip, deflate', 'Accept': '*/*', 'Connection': 'keep-alive'}
+        # 设置最大重试次数
+        i = 0
+        while i < self.max_retry:
+            try:
+                # 注意这里的请求方式, 如果Request没有传递data数据,则默认为get请求,如果有 data=xxx 则为POST请求
+                r = req.get(url=url, timeout=self.timeout)
+                data = r.content  # content获取的是byte, 如果是text获取的是unicode str
+                # res = request.urlopen(req)
+                # data = res.read()
+                # 自动检测内容编码 解决返回数据编码问题导致的乱码
+                chd = chardet.detect(data)
+                charset = chd['encoding']
+                if charset != '' and charset != None:  # 如果检测到编码, 将数据编码设置为检测到的编码,忽略其他编码
+                    data = data.decode(charset, 'ignore')
+                elif charset == None:  # 如果charset为 None 可能是被压缩了,解压后再编码
+                    data = gzip.decompress(data).decode(
+                        self.def_charset, 'ignore')
+                else:
+                    data = data.decode(self.def_charset, 'ignore')
+                # 请求成功,返回
+                if r.status_code == 200:
+                    return str(data)
+                else:
+                    i = i+1
+                    self.show_log("URL: %s 第 %d 次网络请求异常, status_code: %d " %
+                                  (url, i, r.status_code))
+            except requests.exceptions.RequestException as ex:
+                i += 1
+                self.show_log("URL: %s 第 %d 次网络请求异常: %s " %
+                              (url, i, ex.strerror))
 
     # 获取内容文本
+
     def get_content_txt(self, durl):
         data = self.http_req(durl)
+        if data == None:
+            self.show_log("get_content_txt durl: %s 在重试 %d 次仍然异常!, data: %s " %
+                          (durl, self.max_retry, data))
+            return
         # 获取标题
         matche = re.search(self.re_title, data)
         if matche:
             title = '## '+matche.groupdict().get('title')+'\r\n\r\n'
         else:
-            title = '## 小说'+'\r\n\r\n'
+            title = '## Spider'+'\r\n\r\n'
         # 正则获取内容
         matches = re.search(self.re_content, data)
         # 获取指定的匹配组
@@ -126,7 +165,7 @@ class Spider(object):
             # 以追加读写模式打开
             file = open(filename, 'a+', encoding=self.def_charset)
             for index in range(le):
-                sys.stdout.write('\r正在采集第: '+str(index)+' 页, 总:'+str(le))
+                sys.stdout.write('\r正在采集第: '+str(index+1)+' 页, 总:'+str(le))
                 sys.stdout.flush()
                 # 获取列表中的url链接地址,
                 duri = matches[index]
